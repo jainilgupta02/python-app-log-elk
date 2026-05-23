@@ -1,0 +1,80 @@
+name: Python CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    env:
+      LOGSTASH_URL: ${{ secrets.LOGSTASH_URL }}
+      APP_NAME: my-python-app
+      APP_ENV: ci
+      GITHUB_RUN_NUMBER: ${{ github.run_number }}
+      GITHUB_REF_NAME: ${{ github.ref_name }}
+      GITHUB_ACTOR: ${{ github.actor }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run app / tests
+        run: |
+          python app.py
+        timeout-minutes: 2
+
+      - name: Send final status to ELK
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python << 'PYEOF'
+          import os
+          import json
+          import urllib.request
+          import datetime
+
+          payload = {
+              "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+              "level": "INFO" if os.getenv("JOB_STATUS") == "success" else "ERROR",
+              "message": f"CI run {os.getenv('JOB_STATUS')}",
+              "app": os.getenv("APP_NAME"),
+              "environment": os.getenv("APP_ENV"),
+              "conclusion": os.getenv("JOB_STATUS"),
+              "run_number": int(os.getenv("GITHUB_RUN_NUMBER", 0)),
+              "branch": os.getenv("GITHUB_REF_NAME"),
+              "actor": os.getenv("GITHUB_ACTOR"),
+              "repository": os.getenv("GITHUB_REPOSITORY"),
+          }
+
+          url = os.getenv("LOGSTASH_URL")
+
+          if not url:
+              raise Exception("LOGSTASH_URL secret is missing")
+
+          data = json.dumps(payload).encode()
+
+          req = urllib.request.Request(
+              url,
+              data=data,
+              headers={"Content-Type": "application/json"}
+          )
+
+          urllib.request.urlopen(req, timeout=10)
+
+          print("Log sent to ELK successfully")
+          PYEOF
